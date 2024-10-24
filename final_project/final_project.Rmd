@@ -1,0 +1,1146 @@
+---
+output: 
+  pdf_document:
+    citation_package: natbib
+    keep_tex: true
+    fig_caption: true
+    latex_engine: pdflatex
+    template: ../svm-latex-ms.tex
+bibliography: master.bib
+header-includes:
+  - \usepackage{hyperref}
+  - \usepackage{amsmath}
+  - \usepackage{array}   
+  - \usepackage{caption}
+  - \usepackage{graphicx}
+  - \usepackage{siunitx}
+  - \usepackage[table]{xcolor}
+  - \usepackage{multirow}
+  - \usepackage{hhline}
+  - \usepackage{calc}
+  - \usepackage{tabularx}
+  - \usepackage{fontawesome}
+  - \usepackage[para,online,flushleft]{threeparttable}
+  - \setlength\parindent{0pt}
+biblio-style: apsr
+title: "Using Bayesian Modeling to Predict Football Matches after the COVID-19 Pandemic"
+thanks: "Replication files are available on the author's Github account (http://github.com/msancor). **Current version**: `r format(Sys.time(), '%B %d, %Y')`; **Corresponding author**: sanchezcortes.2049495@studenti.uniroma1.it."
+author:
+- name: Miguel Ángel Sánchez Cortés
+  affiliation: SDS II, Sapienza University of Rome
+abstract: "This project proposes and compares two Poisson Bayesian Hierarchical Models to predict the number of goals scored in football matches using data from the top four European leagues over ten seasons (2011-2021). The models' parameters are estimated using the Markov Chain Monte Carlo (MCMC) method via JAGS. We assess the models' predictive power, simulate match outcomes, and estimate home advantage, particularly analyzing its change post-COVID-19. Finally, the 2019-2020 season's parameters are used to simulate and evaluate the accuracy of predictions for the pandemic-affected 2020-2021 season."
+keywords: "bayesian hierarchical models, poisson distribution, football, mcmc, covid-19"
+date: "`r format(Sys.time(), '%B %d, %Y')`"
+geometry: margin=1in
+fontfamily: libertine
+fontsize: 12pt
+# spacing: double
+endnote: no
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(cache=FALSE,
+                      message=FALSE, warning=FALSE,
+                      fig.width=9,
+                      fig.height=5,
+                      dpi=90,
+                      fig.path='figs/',
+                      cache.path = '_cache/',
+                      fig.process = function(x) {
+                      x2 = sub('-\\d+([.][a-z]+)$', '\\1', x)
+                      if (file.rename(x, x2)) x2 else x
+                      })
+
+#Here we set the working directory
+setwd("/Users/miguelangel/Documents/Master/SDS/Bayesian-Football/final_project")
+library(dplyr)
+library(ggplot2)
+library(rjags)
+library(coda)
+library(mcmcplots)
+library(stringr)
+library(gridExtra)
+
+source("DBDA2E-utilities.R")
+
+#Function to create the column names for the JAGS data
+col_name <- function(name, ...) {
+  paste0(name, "[", paste(..., sep=",") , "]")
+}
+```
+
+```{r data_reading, echo=FALSE, cache=TRUE}
+
+#First we load the data to a data frame from a CSV file
+leagues_results.df <- read.csv("../data/leagues_results.csv")
+
+#Now we separate the data into a data frame for each league
+leagues_results_premier.df <- leagues_results.df[leagues_results.df$league == "ENG-Premier League",]
+league_results_laliga.df <- leagues_results.df[leagues_results.df$league == "ESP-La Liga",]
+league_results_bundesliga.df <- leagues_results.df[leagues_results.df$league == "GER-Bundesliga",]
+league_results_seriea.df <- leagues_results.df[leagues_results.df$league == "ITA-Serie A",]
+```
+```{r jags_data, echo=FALSE}
+#Here we obtain the different teams and seasons in the dataset
+teams_premier <- unique(c(leagues_results_premier.df$home_team, leagues_results_premier.df$away_team))
+teams_seriea <- unique(c(league_results_seriea.df$home_team, league_results_seriea.df$away_team))
+teams_laliga <- unique(c(league_results_laliga.df$home_team, league_results_laliga.df$away_team))
+teams_bundesliga <- unique(c(league_results_bundesliga.df$home_team, league_results_bundesliga.df$away_team))
+seasons <- unique(leagues_results.df$season)
+
+#Here we create the list with the data that we want to use in the model for each league
+#We will use this data lists for JAGS simulations
+data_premier <- list(
+  home_goals = leagues_results_premier.df$home_score,
+  away_goals = leagues_results_premier.df$away_score,
+  home_team = as.numeric(factor(leagues_results_premier.df$home_team, levels = teams_premier)),
+  away_team = as.numeric(factor(leagues_results_premier.df$away_team, levels = teams_premier)),
+  season = as.numeric(factor(leagues_results_premier.df$season, levels = seasons)),
+  n_teams = length(teams_premier),
+  n_games = nrow(leagues_results_premier.df),
+  n_seasons = length(seasons)
+)
+
+data_laliga <- list(
+  home_goals = league_results_laliga.df$home_score,
+  away_goals = league_results_laliga.df$away_score,
+  home_team = as.numeric(factor(league_results_laliga.df$home_team, levels = teams_laliga)),
+  away_team = as.numeric(factor(league_results_laliga.df$away_team, levels = teams_laliga)),
+  season = as.numeric(factor(league_results_laliga.df$season, levels = seasons)),
+  n_teams = length(teams_laliga),
+  n_games = nrow(league_results_laliga.df),
+  n_seasons = length(seasons)
+)
+
+data_bundesliga <- list(
+  home_goals = league_results_bundesliga.df$home_score,
+  away_goals = league_results_bundesliga.df$away_score,
+  home_team = as.numeric(factor(league_results_bundesliga.df$home_team, levels = teams_bundesliga)),
+  away_team = as.numeric(factor(league_results_bundesliga.df$away_team, levels = teams_bundesliga)),
+  season = as.numeric(factor(league_results_bundesliga.df$season, levels = seasons)),
+  n_teams = length(teams_bundesliga),
+  n_games = nrow(league_results_bundesliga.df),
+  n_seasons = length(seasons)
+)
+
+data_seriea <- list(
+  home_goals = league_results_seriea.df$home_score,
+  away_goals = league_results_seriea.df$away_score,
+  home_team = as.numeric(factor(league_results_seriea.df$home_team, levels = teams_seriea)),
+  away_team = as.numeric(factor(league_results_seriea.df$away_team, levels = teams_seriea)),
+  season = as.numeric(factor(league_results_seriea.df$season, levels = seasons)),
+  n_teams = length(teams_seriea),
+  n_games = nrow(league_results_seriea.df),
+  n_seasons = length(seasons)
+)
+```
+```{r regression_data, echo=FALSE, cache=TRUE}
+df_premier <- rbind(data.frame(team=leagues_results_premier.df$home_team, opponent=leagues_results_premier.df$away_team, home=1, goals=leagues_results_premier.df$home_score),
+  data.frame(team=leagues_results_premier.df$away_team, opponent=leagues_results_premier.df$home_team, home=0, goals=leagues_results_premier.df$away_score))
+
+df_laliga <- rbind(data.frame(team=league_results_laliga.df$home_team, opponent=league_results_laliga.df$away_team, home=1, goals=league_results_laliga.df$home_score),
+  data.frame(team=league_results_laliga.df$away_team, opponent=league_results_laliga.df$home_team, home=0, goals=league_results_laliga.df$away_score))
+
+df_bundesliga <- rbind(data.frame(team=league_results_bundesliga.df$home_team, opponent=league_results_bundesliga.df$away_team, home=1, goals=league_results_bundesliga.df$home_score),
+  data.frame(team=league_results_bundesliga.df$away_team, opponent=league_results_bundesliga.df$home_team, home=0, goals=league_results_bundesliga.df$away_score))
+
+df_seriea <- rbind(data.frame(team=league_results_seriea.df$home_team, opponent=league_results_seriea.df$away_team, home=1, goals=league_results_seriea.df$home_score),
+  data.frame(team=league_results_seriea.df$away_team, opponent=league_results_seriea.df$home_team, home=0, goals=league_results_seriea.df$away_score))
+```
+
+# Introduction
+
+Statistical modeling of sports data is a widely studied area, with a significant body of research dedicated to it, particularly in the context of football. From a statistical perspective, this field presents intriguing challenges. One key issue is the distribution pattern of the number of goals scored by each team in a single match. Understanding the distributional form of goal counts is crucial for accurately modeling football outcomes. This challenge involves determining the appropriate statistical distributions that best represent the variability and frequency of goals scored by opposing teams during a match. Although the Binomial and Negative Binomial distributions were suggested in the late 1980s [@pollard], the Poisson distribution has since become widely accepted as a suitable model for the number of goals scored in football matches. A common simplifying assumption in this context is the independence of goals scored by the home and away teams. For example, @maher utilized a model with two independent Poisson variables, where the parameters are derived from the interaction between one team's attacking strength and the opposing team's defensive weakness.\
+
+In this project, we propose and compare two different Bayesian Hierarchical Models for the number of goals scored by two teams in a given match along with a frequentist model based on Poisson regression. We use data from the top four European football leagues (English Premier League, Spanish La Liga, Italian Serie A, and German Bundesliga) for the 10 seasons spanning from 2011 to 2021. The Bayesian models are based on the Poisson distribution, and we estimate their parameters using the Markov Chain Monte Carlo (MCMC) method and the JAGS tool. We use the estimated parameters to predict the number of goals scored by a given team in a match and simulate the outcome of the match to calculate the probability of each team winning, losing, or drawing. Moreover, we use one of these models to estimate the home advantage in a given football match and analyze how this variable changed after the COVID-19 pandemic. Finally, we use the estimated parameters for the 2019-2020 season to simulate the outcome of the matches during the 2020-2021 season and compare the results with the actual outcomes to analyze the predictive power of our Poisson model for football seasons affected by the COVID-19 pandemic and by the lack of fans in the stadiums.
+
+# The Dataset
+
+The dataset used in this project contains information on the number of goals scored by each team in each match of the top four European football leagues (English Premier League, Spanish La Liga, Italian Serie A, and German Bundesliga) over ten seasons (2011-2021). The dataset was obtained by scraping the [WhoScored](https://www.whoscored.com/) website, which provides detailed statistics on football matches. An example of the some of the entries within the dataset is shown in Table 1.
+
+```{r echo=FALSE}
+knitr::kable(head(leagues_results.df), caption = "First 6 entries of the dataset including results from games of the English Premier League in the 2011-2012 season.", col.names = c("League", "Season", "Home Team", "Away Team", "Home Goals", "Away Goals", "Points Home", "GD Home"))
+```
+
+The dataset includes in total 14532 matches with 130 different teams. In Table 2 we present the number of matches and teams by league along with some statistics on the average number of goals scored per match and the average number of points obtained by the home and away teams. As we can observe, the number of matches per league during the selected time period is around 3798, with an average of 35 teams per league and an average of 3.7 goals scored per match.
+
+```{r echo=FALSE}
+knitr::kable(leagues_results.df %>% group_by(league) %>% summarise(n_matches = n(), n_teams = n_distinct(home_team), avg_goals = mean(home_score + away_score), avg_points_home = mean(`points_home`), avg_points_away=mean(abs(`points_home`-3))), caption = "Number of matches and teams by league along with some statistics of the dataset.", col.names = c("League", "Number of Matches", "Number of Teams", "Average Goals per Match", "Average Points Home", "Average Points Away"))
+```
+
+Moreover, the average number of points obtained by the home team is around 1.6 points per match, whereas the average number of points obtained by the away team is around 1.4 points per match, suggesting that there is indeed a home advantage in football matches as hypothesized by some experts [@mcgrath2020anfield]. This also suggests that inferring the home advantage in football matches could potentially be a useful application in order to predict the outcome of football matches.\
+
+To motivate the use of the Poisson distribution to model the number of goals scored by each team in a football match, we present in Figure 1 the distribution of the number of goals scored by the home teams for all matches in the dataset alongside with the distribution of random Poisson samples with the same mean as the home goals. As we can observe, the distribution of the number of goals scored by the home teams is well approximated by the Poisson distribution, with a mean of around 2.06 goals per match.
+
+
+```{r echo=FALSE, fig.cap="Probability distribution of the number of goals scored by the home teams for all matches in the dataset along with random samples from a Poisson distribution with the same mean.", cache=TRUE}
+par(mfrow=c(1,2))
+#Here we plot the probability distribution of the number of goals scored by the home teams
+hist(leagues_results.df$home_score, freq = FALSE, breaks = -1:11, main = "Home Goals Distribution", xlab = "Goals", ylab = "Probability", col = "lightblue")
+#Here we add a legend with the mean of the home goals
+legend("topright", legend = c(paste("Mean Home Goals: ", round(mean(leagues_results.df$home_score), 2))), fill = c("lightblue"))
+
+#Here we plot the probability distribution for random Poisson samples with the same mean as the home goals
+x.pois <- rpois(100000, mean(leagues_results.df$home_score))
+hist(x.pois, freq = FALSE, breaks = -1:11, main = "Poisson Distribution", xlab = "Goals", ylab = "Probability", col = "lightblue")
+#Here we add a legend with the mean of the home goals
+legend("topright", legend = c(paste("Mean Poisson: ", round(mean(x.pois), 2))), fill = c("lightblue"))
+```
+
+Analogously, if we plot the distribution of the number of goals scored by the away teams for all matches in the dataset, we observe that this distribution is also well approximated by the Poisson distribution, with a mean of around 1.71 goals per match, which is consistent with the hypothesis that the home team has an advantage in football matches and tends to score more goals than the away team. In general, the plots above and below suggest that the Poisson distribution is a suitable model for the number of goals scored by each team in a football match, where the mean of the Poisson distribution is the average number of goals scored by a team in a match and could depend on the teams playing, the league, the season, and other factors that could be entered within a model.
+
+```{r echo=FALSE, fig.cap="Probability distribution of the number of goals scored by the away teams for all matches in the dataset along with random samples from a Poisson distribution with the same mean.", cache=TRUE}
+par(mfrow=c(1,2))
+#Here we plot the probability distribution of the number of goals scored by the away teams
+hist(leagues_results.df$away_score, freq = FALSE, breaks = -1:11, main = "Away Goals Distribution", xlab = "Goals", ylab = "Probability", col = "lightblue")
+#Here we add a legend with the mean of the away goals
+legend("topright", legend = c(paste("Mean Away Goals: ", round(mean(leagues_results.df$away_score), 2))), fill = c("lightblue"))
+
+#Here we plot the probability distribution for random Poisson samples with the same mean as the away goals
+x.pois <- rpois(100000, mean(leagues_results.df$away_score))
+hist(x.pois, freq = FALSE, breaks = -1:11, main = "Poisson Distribution", xlab = "Goals", ylab = "Probability", col = "lightblue")
+#Here we add a legend with the mean of the away goals
+legend("topright", legend = c(paste("Mean Poisson: ", round(mean(x.pois), 2))), fill = c("lightblue"))
+```
+
+As showed in the plots above, home advantage exists in football matches and it affects the way we can predict the goals made by a football team in a given match. Given this information, it is interesting to observe what happened to home advantage for the seasons after the COVID-19 pandemic (2020-2021 and 2021-2022) since it could be hypothesized that the absence of fans in the stadiums could have affected the home advantage in football matches and made it less significant. To build on this hypothesis, First, we performed a t-test to see whether the home team’s match results changed during the COVID-19 break.
+
+```{r t-test, echo=FALSE}
+#Now we can perform at-test to compare the average points_home before and after the COVID-19 pandemic
+#We will compare the average points_home before the 2019-2020 season with the average points_home after the 2019-2020 season
+#We will use a significance level of 0.05
+#First we obtain a vector with the average points_home of all leagues where each element is the average points_home for a given season
+avg_points_home_before <- tapply(leagues_results.df$points_home[leagues_results.df$season < 1920], leagues_results.df$season[leagues_results.df$season < 1920], mean)
+avg_points_home_after <- tapply(leagues_results.df$points_home[leagues_results.df$season >= 1920], leagues_results.df$season[leagues_results.df$season >= 1920], mean)
+#Now we perform the t-test
+t_test_points <- t.test(avg_points_home_before, avg_points_home_after, alternative = "two.sided", var.equal = TRUE)
+
+#Now we can perform a t-test to compare the average goal difference at home before and after the COVID-19 pandemic
+#We will compare the average goal difference at home before the 2019-2020 season with the average goal difference at home after the 2019-2020 season
+#We will use a significance level of 0.05
+#First we obtain a vector with the average goal_difference_home of all leagues where each element is the average goal_difference_home for a given season
+avg_goal_difference_home_before <- tapply(leagues_results.df$goal_difference_home[leagues_results.df$season < 1920], leagues_results.df$season[leagues_results.df$season < 1920], mean)
+avg_goal_difference_home_after <- tapply(leagues_results.df$goal_difference_home[leagues_results.df$season >= 1920], leagues_results.df$season[leagues_results.df$season >= 1920], mean)
+#Now we perform the t-test
+t_test_goal_difference <- t.test(avg_goal_difference_home_before, avg_goal_difference_home_after, alternative = "two.sided", var.equal = TRUE)
+
+#Now we combine the results of the t-tests in a data frame and print it in a table
+#we inclued the t, df, p-value, 95% confidence interval, mean before COVID-19, and mean after COVID-19 for the points_home and goal_difference_home
+#We print the CI as a bracket
+t_test_results <- data.frame(c("t", "df", "p-value", "95% CI", "Mean Before COVID-19", "Mean After COVID-19"), c(round(t_test_points$statistic, 4), t_test_points$parameter, round(t_test_points$p.value, 4), paste("[", round(t_test_points$conf.int[1], 4), ", ", round(t_test_points$conf.int[2], 4), "]", sep = ""), round(mean(avg_points_home_before), 4), round(mean(avg_points_home_after), 2)), c(round(t_test_goal_difference$statistic, 4), t_test_goal_difference$parameter, round(t_test_goal_difference$p.value, 4), paste("[", round(t_test_goal_difference$conf.int[1], 4), ", ", round(t_test_goal_difference$conf.int[2], 4), "]", sep = ""), round(mean(avg_goal_difference_home_before), 4), round(mean(avg_goal_difference_home_after), 4)))
+colnames(t_test_results) <- c("Test Statistic", "Expected Points", "Goal Difference")
+knitr::kable(t_test_results, caption = "T-test results comparing the average points_home and goal_difference_home before and after the COVID-19 pandemic.")
+```
+
+Table 3 shows the t-test results performed on the expected points (average points a team is expected to earn on their home field) and the goal difference (goals scored by the home team minus goals scored by the away team), both averaged per league and per season. The test results show that mean values of the expected points and goal difference changed over the COVID-19 break. 
+
+```{r echo=FALSE, fig.cap="Average points at home per season for all leagues in the dataset along with the average goal difference at home per season."}
+#Now we obtain a vector for each league where each element is the average points_home for a given season
+premier_avg_points_home <- tapply(leagues_results_premier.df$points_home, leagues_results_premier.df$season, mean)
+la_liga_avg_points_home <- tapply(league_results_laliga.df$points_home, league_results_laliga.df$season, mean)
+bundesliga_avg_points_home <- tapply(league_results_bundesliga.df$points_home, league_results_bundesliga.df$season, mean)
+serie_a_avg_points_home <- tapply(league_results_seriea.df$points_home, league_results_seriea.df$season, mean)
+#We also obtain the average points home for all leagues
+all_leagues_avg_points_home <- tapply(leagues_results.df$points_home, leagues_results.df$season, mean)
+
+#Now we make the same plot but with the goal_difference_home
+premier_avg_goal_difference_home <- tapply(leagues_results_premier.df$goal_difference_home, leagues_results_premier.df$season, mean)
+la_liga_avg_goal_difference_home <- tapply(league_results_laliga.df$goal_difference_home, league_results_laliga.df$season, mean)
+bundesliga_avg_goal_difference_home <- tapply(league_results_bundesliga.df$goal_difference_home, league_results_bundesliga.df$season, mean)
+serie_a_avg_goal_difference_home <- tapply(league_results_seriea.df$goal_difference_home, league_results_seriea.df$season, mean)
+all_leagues_avg_goal_difference_home <- tapply(leagues_results.df$goal_difference_home, leagues_results.df$season, mean)
+
+#First we create a vector with the seasons
+seasons <- 1:10
+par(mfrow=c(1,2))
+#Now we plot the data without ticks on the x-axis
+plot(seasons, premier_avg_points_home, type = "o", col = "blue", xlab = "", ylim=c(1.35,1.76), ylab = "Avg. Points at Home", xaxt = "n")
+lines(seasons, la_liga_avg_points_home, type = "o", col = "red")
+lines(seasons, bundesliga_avg_points_home, type = "o", col = "green")
+lines(seasons, serie_a_avg_points_home, type = "o", col = "purple")
+#Here we add the seasons names to the x-axis moved at an angle of 90 degrees
+axis(1, at = seasons, labels = c("2011-2012", "2012-2013", "2013-2014", "2014-2015", "2015-2016", "2016-2017", "2017-2018", "2018-2019", "2019-2020", "2020-2021"), las = 2)
+#Here we make a dotted line for the average points_home for all leagues
+lines(seasons, all_leagues_avg_points_home, type = "o", col = "black", lty = 2)
+legend("bottomleft", c("Premier League", "La Liga", "Bundesliga", "Serie A", "All Leagues"), col = c("blue", "red", "green", "purple", "black"), lty = c(1,1,1,1,2), lwd = 2)
+
+plot(seasons, premier_avg_goal_difference_home, type = "o", col = "blue", xlab = "", ylim=c(0,0.65), ylab = "Avg. Goal Diff. at Home", xaxt = "n")
+lines(seasons, la_liga_avg_goal_difference_home, type = "o", col = "red")
+lines(seasons, bundesliga_avg_goal_difference_home, type = "o", col = "green")
+lines(seasons, serie_a_avg_goal_difference_home, type = "o", col = "purple")
+lines(seasons, all_leagues_avg_goal_difference_home, type = "o", col = "black", lty = 2)
+#Here we add the seasons names to the x-axis moved at an angle of 90 degrees
+axis(1, at = seasons, labels = c("2011-2012", "2012-2013", "2013-2014", "2014-2015", "2015-2016", "2016-2017", "2017-2018", "2018-2019", "2019-2020", "2020-2021"), las = 2)
+legend("bottomleft", c("Premier League", "La Liga", "Bundesliga", "Serie A", "All Leagues"), col = c("blue", "red", "green", "purple", "black"), lty = c(1,1,1,1,2), lwd = 2)
+```
+
+We can also visualize these quantified measures (expected points and goal difference) to determine how an unattended home match affects the match result of the home team. In Figure 3 we can observe the trends of the expected points and goal difference of the home team for each season in four major European football leagues. We can observe that the expected points and the goal difference of the home team have dropped noticeably since the 2019–2020 season on average, as indicated by the black dashed line. We can argue that the effect of limited spectator attendance is reflected in these two quantified measures in some months after the COVID-19 break.
+
+# First Modeling Approach: Poisson Regression
+
+As a first approach to modeling the number of goals scored by each team in a football match, and taking into account the home advantage variable we observed earlier, we propose a Poisson regression model. The Poisson regression model is a type of Generalized Linear Model (GLM)[^1] that is used to model count data. In a nutshell, the Poisson regression assumes that a response variable $Y \sim Pois(\lambda)$, and assumes the logarithm of its expected value can be modeled by a linear combination of unknown parameters. Mathematically, given $\mathbf{x}$ as the vector of predictors, the Poisson regression model can be written as:
+
+\begin{equation}
+\log(E(Y|X)) = \mathbf{\theta} \mathbf{x},
+\end{equation}
+
+[^1]: A GLM generalizes linear regression by allowing the linear model to be related to the response variable via a link function and by allowing the magnitude of the variance of each measurement to be a function of its predicted value.
+
+where $\mathbf{\theta}$ is the vector of unknown parameters to be estimated. Therefore, given a Poisson regression model 
+$\mathbf{\theta}$ and an input vector $\mathbf{x}$, the predicted mean of the associated Poisson distribution is given by:
+
+\begin{equation}
+E(Y|X) = e^{\mathbf{\theta} \mathbf{x}}.
+\end{equation}
+
+Now, considering we have $Y_i$ independent observations of the response variable $Y$ and the corresponding input vectors $\mathbf{x}_i$, we can estimate the parameters $\mathbf{\theta}$ by the principle of maximum likelihood. To do this, we need to find the set of parameters $\mathbf{\theta}$ that maximize the likelihood function of the data given by:
+
+\begin{equation}
+p(y_1, \dots, y_n | x_1, \dots, x_n; \theta)= L(\mathbf{\theta}) = \prod_{i=1}^{n} \frac{y_i e^{\mathbf{\theta} x_i} e^{-e^{\mathbf{\theta} x_i}}}{y_i!}.
+\end{equation}
+
+In R this is very simple to do using the glm function. As an example, we can fit a Poisson regression model to the number of goals scored by each team in the Serie A during the 2011-2021 period. To do this, we can first create a data frame with the predictors of our model: the home team, the away team, the number of goals (by the home or away team), and the home advantage variable, that takes as value 1 if the goals are made by the home team and 0 otherwise. In Table 4 we show the first rows of the data frame we created for this purpose.
+
+```{r poisson-regressiondata, echo=FALSE}
+knitr::kable(head(df_seriea), caption = "First rows of the data frame used to fit the Serie A Poisson regression model.", col.names = c("Home", "Away", "At Home", "Goals"))
+```
+
+Then, we can fit our model using the glm function in R. The code below shows how to fit a Poisson regression model to the number of goals scored by each team in the Serie A during the 2011-2021 period:
+
+\footnotesize
+```{r poisson-regression, echo=TRUE}
+pois_model <- glm(goals ~ home + team + opponent, family=poisson(link=log),
+                  data=df_seriea)
+```
+
+\normalsize
+
+In Table 5 we show the significant coefficients of the Poisson regression model fitted to the Serie A data. We can observe that the home variable has a significant effect on the number of goals scored by a team, as indicated by its p-value, and therefore adding more confidence to our hypothesis that a team playing at home are more likely to score goals. It is also interesting to see that Juventus had the highest and more significant coefficient both as a home team and as an away team, indicating that Juventus consistently scored more goals than the other teams in the Serie A during the 2011-2021 period, confirmed by the fact that this team won the Serie A title in 9 out of the 10 seasons analyzed. Other teams considered as part of the "Big Teams" in the Serie A, such as Inter Milan, AC Milan, and AS Roma, also had significant coefficients, indicating that these teams also scored more goals than the other teams in the Serie A during this period. On the other side, teams like Crotone, Benevento, and Frosinone had also significant coefficients playing as an opponent, indicating that these teams conceded more goals than the other teams in the Serie A during this period. This is consistent with the fact that these teams were relegated to the Serie B in the seasons they played in the Serie A.
+
+```{r poisson-regressionresults, echo=FALSE}
+#Here we print only the results with coefficients with p-value < 0.05
+results.seriea <- data.frame(summary(pois_model)[12])
+colnames(results.seriea) <- c("Estimate", "Std. Error", "Z-Value", "P-Value")
+
+results.seriea <- results.seriea[results.seriea$`P-Value` < 0.05,]
+knitr::kable(results.seriea, caption = "Significant Results of the Poisson regression model fitted to the Serie A data.")
+```
+
+In Appendix A we can observe the results given for the Poisson regression model fitted to data from other leagues such as the Premier League, La Liga, and Bundesliga. We can see that the home variable has a significant effect on the number of goals scored by a team in all leagues, consistent with the home advantage hypothesis. Moreover, we observe similar trends than in the Serie A, with "big" teams such as Manchester City, Barcelona and Bayern Munich having significant coefficients both as a home and away team, indicating that these teams scored more goals than the other teams in their respective leagues.\
+
+Using this model, we can also predict the number of goals scored by each team in a football match. To do this, we can use the predict function in R. As an example, we can try to predict the result of the roman derby between AS Roma and Lazio for the 2021-2022 season. To do this, we can use the code below:
+
+\footnotesize
+```{r poisson-predict, echo=TRUE}
+roma<-predict(pois_model,
+              newdata=data.frame(home=1, team="Roma",opponent="Lazio"),
+              type="response")
+lazio<-predict(pois_model,
+               newdata=data.frame(home=0, team="Lazio",opponent="Roma"),
+               type="response")
+print(paste("AS Roma - Lazio: ", round(roma), " - ", round(lazio)))
+```
+
+\normalsize
+
+As we can observe, we predicted a 2-2 draw between AS Roma and Lazio in the roman derby for the 2021-2022 season. This is consistent with the fact that the roman derby is one of the most balanced matches in the Serie A, with both teams having a similar number of wins and draws in the last 10 years. Surprisingly, the real result was a staggering 3-0 win for AS Roma. This suggests that our model clearly doesn't capture all the information needed to predict the result of a football match, and that considering other factors may improve the accuracy of our predictions. Moreover, predictions given by the model are deterministic, since same input will always give the same output. This is not ideal for a model that aims to predict the result of a football match, since the outcome of a football match is inherently uncertain. In the next section we propose a Bayesian Hierarchical Model to model the number of goals scored by each team in a football match, that will allow us to capture this uncertainty and make probabilistic predictions by sampling from the posterior distribution of the model.
+
+
+# Second Modeling Approach: Bayesian Hierarchical Model
+
+As a second approach to modeling the number of goals scored by each team in a football match, we propose a Bayesian Hierarchical Model that assumes that the number of goals scored by each team in a match follows a Poisson distribution and that the distribution of goals for home and away teams are not the same, since we observe this in the data. The model is called hierarchical because it has multiple levels of parameters that are estimated using Bayesian statistics. Mathematically, we write that the goal outcome of a match between team $i$ and team $j$ is modeled as:
+
+\begin{align}
+\text{GOAL}_{\text{home}} &\sim Pois(\lambda_{\text{home},i,j}), \\
+\text{GOAL}_{\text{away}} &\sim Pois(\lambda_{\text{away},i,j}).
+\end{align}
+
+We also assume that the mean of the Poisson distribution depends on the skills of the teams playing, since not all teams are equally good. At the same time, the mean can also depend on external factors for teams, such as the stadium, weather, etc. Therefore, we model the mean of the Poisson distribution as:
+\begin{align}
+\log(\lambda_{\text{home},i,j}) &=\text{OTHERS} + \text{SKILL}_{i} -  \text{SKILL}_{j},\\
+\log(\lambda_{\text{away},i,j}) &=\text{OTHERS} - \text{SKILL}_{i} +  \text{SKILL}_{j}.
+\end{align}
+
+As the number of goals are assumed to be Poisson distributed it is natural that the skills of the teams are on the log scale of the mean of the distribution, since in this way we can linearize multiplicative relationships between the teams' abilities and the expected number of goals. After defining the model, we need to specify the prior distributions for the parameters of the model in order to be able to make inferences about the skills of the teams and the means of the Poisson distributions. We propose very weakly informative priors for the parameters of the model, in order to avoid biasing the results of the model:
+\begin{align}
+\text{OTHERS} &\sim N(0, 4^2), \\
+\text{SKILL}_{i} &\sim N(\mu_{\text{teams}}, \sigma_{\text{teams}}^2), \\
+\mu_{\text{teams}} &\sim N(0, 4^2), \\
+\sigma_{\text{teams}} &\sim U(0, 3).
+\end{align}
+
+We can observe that the prior on the OTHERS parameter has a standard deviation of 4, and since this is on the log scale of the mean number of goals, it implies that the prior on the mean number of goals is a log-normal distribution with a mean of 1 and a standard deviation of 4. This is a very weakly informative prior, since it implies that the mean number of goals is likely to be between 0.018 and 54.6 goals, which is a very wide range. Given that the average number of goals per match by a team is fewer than two in European football leagues, we affirm that this prior is weakly informative and doesn't introduce prior knowledge to our model.\
+
+Now that we defined the model and the prior distributions, we can estimate the parameters of the model using Bayesian statistics. Specifically, we use the JAGS software to estimate the parameters of the model by performing a Markov Chain Monte Carlo (MCMC) simulation. The MCMC simulation is a method that allows us to sample from the posterior distribution of the parameters of the model, which is the distribution of the parameters of the model given the data. We can write the above model using JAGS syntax as follows:
+
+\footnotesize
+```{r first_jags_model, echo=TRUE}
+model1 <- "model {
+  for (i in 1:n_games) {
+    home_goals[i]~dpois(lambda_home[home_team[i], away_team[i]])
+    away_goals[i]~dpois(lambda_away[home_team[i], away_team[i]])
+  }
+  
+  for (home_i in 1:n_teams) {
+    for (away_j in 1:n_teams) {
+      lambda_home[home_i, away_j]<-exp(others+skill[home_i]-skill[away_j])
+      lambda_away[home_i, away_j]<-exp(others+skill[away_j]-skill[home_i])
+    }
+  }
+  
+  skill[1] <- 0
+  for (j in 2:n_teams) {
+    skill[j]~dnorm(mu_team, tau_team)
+  }
+  
+  mu_team~dnorm(0, 0.0625)
+  tau_team<-1/pow(sigma_team,2)
+  sigma_team~dunif(0, 3)
+  others~dnorm(0, 0.0625)
+}"
+```
+\normalsize
+
+It is important to notice that the model is written in JAGS syntax, which is a language that allows us to specify the model and the prior distributions in a way that JAGS can understand. In this model, the normal distribution is written as $N(\mu, \tau)$, where $\mu$ is the mean of the distribution and $\tau$ is the precision of the distribution, which is the inverse of the variance. At the same time, we can notice that we previously defined the skill of the first team as 0, which is a common practice in Bayesian statistics to avoid identifiability issues in the model. This is because the skills of the teams are relative to each other, and if we don't fix the skill of one team, the model will not be able to estimate the skills of the other teams.\
+
+After defining the model above, we can use the R2jags package to run the MCMC simulation and estimate the parameters of the model. From this moment onward, we will exclusively work with the Serie A dataset (unless it is specified otherwise) for computational reasons. We can write the code to setup and run the MCMC simulation as follows:
+
+\footnotesize
+```{r first_jags_model_run, echo=TRUE, cache=TRUE}
+run_model1 <- function(){
+  #Here we compile the first model
+  m1 <- jags.model(textConnection(model1),
+      data = data_seriea, n.chains = 3, n.adapt = 5000, quiet = TRUE)
+  #Here we burn the first 5000 iterations
+  update(m1, 5000)
+  #Here we generate MCMC samples
+  s1 <- coda.samples(m1,
+      variable.names = c("others", "skill","mu_team","sigma_team"),
+      n.iter = 10000, thin = 2)
+  #Here we obtain the DIC
+  dic1 <-dic.samples(m1, n.iter = 10000, thin = 2)
+  return(list(samples = s1, dic = dic1))
+}
+```
+```{r save_model1, echo=FALSE}
+#Here we run the model and save the results so we don't need to run it again
+if (file.exists("results_model1.rds")) {
+  res_model1 <- readRDS("results_model1.rds")
+} else {
+  res_model1 <- run_model1()
+  saveRDS(res_model1, "results_model1.rds")
+}
+
+#Here we save the samples in a matrix
+ms1 <- as.matrix(res_model1$samples)
+```
+\normalsize
+
+We can make a few comments about the code above. First, to compile our model, we specified some important parameters to ensure convergence of the MCMC simulation. Specifically, we specified the number of chains as three, which is a common practice to ensure that the chains are exploring the parameter space correctly. We also specified the number of adaptation steps as 5000, which is the number of iterations that JAGS will use to adapt the proposal distribution of the MCMC algorithm. This is important to ensure that the MCMC algorithm is sampling from the posterior distribution correctly. After compiling the model, we burned the first 5000 iterations of the MCMC simulation to ensure that the chains are sampling from the stationary distribution of the model. Finally, we generated 10000 MCMC samples by using a thinning of 2, which means that we are keeping every second sample of the MCMC chain to reduce autocorrelation in the samples.\
+
+Once we have the MCMC samples, it is also good practice to check the convergence of the MCMC simulation. We can do this by checking the trace plots of the MCMC samples, which are plots that show the evolution of the MCMC samples over the iterations of the simulation. For example, in Figure 4, we show the trace plot of the OTHERS variable the teams in the Serie A dataset. We can see that the trace plot is stationary, which is a good indication that the MCMC simulation has converged. At the same time, we can observe the plot for the posterior distribution of the OTHERS variable, as we can observe, the values are less spread than the prior distribution, which had a normal distribution with mean 0 and variance 0.0625.
+
+```{r trace_plot_model1, echo=FALSE, fig.cap="Trace plot of the OTHERS variable of the teams in the Serie A dataset.",  fig.height=4}
+#Here we plot the trace plot of the skill of the teams
+plot(res_model1$samples[,"others"])
+```
+
+We can also observe the Gelman-Rubin statistic (i.e. shrink factor) to check the convergence of the MCMC simulation. The Gelman-Rubin statistic is a measure of the convergence of the MCMC chains, and it is calculated as the ratio of the between-chain variance to the within-chain variance. A value of 1 indicates that the chains have converged, while a value greater than 1 indicates that the chains have not converged. In Figure 5, we can see that the Gelman-Rubin statistic is close to 1 for the OTHERS parameter of the model, which is a good indication that the MCMC simulation has converged.\
+
+```{r gelman_rubin_model1, echo=FALSE, fig.cap="Gelman-Rubin statistic for the OTHERS variable of the teams in the Serie A dataset.", fig.width=5, fig.height=4}
+#Here we plot the Gelman-Rubin statistic
+gelman.plot(res_model1$samples[,"others"])
+
+```
+
+Finally, we can also check the autocorrelation of the MCMC samples to ensure that the samples are independent. Since we are performing a MCMC simulation, samples are not independent given that the next sample is dependent on the previous one. However, if our simulation is working correctly, the samples should be approximately independent. In Figure 6, we show the autocorrelation plot of the OTHERS variable of the teams in the Serie A dataset. We can see that the autocorrelation is close to zero for all lags, which is a good indication that the MCMC samples are approximately independent.
+
+```{r autocorrelation_model1, echo=FALSE, fig.cap="Autocorrelation plot of the OTHERS variable of the teams in the Serie A dataset.", fig.height=4}
+par(mfrow=c(1,3))
+#Here we plot the autocorrelation of the samples of chain 1. We make the background white to improve visualization
+autplot1(res_model1$samples[,"others"], chain=1, style="plain")
+
+#Here we plot the autocorrelation of the samples of chain 2
+autplot1(res_model1$samples[,"others"], chain=2, style="plain")
+
+#Here we plot the autocorrelation of the samples of chain 3
+autplot1(res_model1$samples[,"others"], chain=3, style="plain")
+```
+
+As we could see, the MCMC simulation has converged, and the samples are approximately independent (this is also true for the other variables of the model which we will not show here). Therefore, we can use the MCMC samples to make inferences about the parameters of the model. For example, in Figure 7, we can obtain a summary for the SKILL parameter for AS Roma and Lazio respectively.\
+
+```{r summary_model1, echo=FALSE, fig.cap="Summary of the skill parameter for AS Roma and Lazio.", fig.height=4}
+par(mfrow=c(1,2))
+#Here we plot the summary of the skill parameter for AS Roma. We silence the output to avoid printing the summary
+plotPost(res_model1$samples[, col_name("skill", which(teams_seriea == "Lazio"))], main="Lazio", col = "#87d8f7", xlab="Skill")
+
+#Here we plot the summary of the skill parameter for Juventus
+plotPost(res_model1$samples[, col_name("skill", which(teams_seriea == "Roma"))], main="Roma", col = "#8e1f2f", xlab="Skill")
+```
+
+As we can observe, the posterior distribution for the skill parameter for AS Roma has a mode of 0.042 with a HDI of [-0.026, 0.115], whereas for Lazio it takes a mode of -0.016 with a HDI of [-0.085, 0.05]. This means that AS Roma has a consistently higher skill parameter than Lazio, which could suggest that AS Roma is a better team than Lazio (at least according to the model). It is important to notice that this parameter is relative with respect to the other teams in the league, in particular, we set the 0 value to be the skill of AC Milan. Therefore, a positive value indicates a better team than AC Milan, while a negative value indicates a worse team than AC Milan.\
+
+Using the MCMC samples it is not only possible to look at the distribution of parameter values but it is also straightforward to simulate matches between teams and obtain the distribution of goals scored and the probability of a win for the home team, a win for the away team or a draw. In Figure 8, we show the simulated results for a match between AS Roma and Lazio and the distribution of the real results.\
+
+
+```{r match_prediction_model1, echo=FALSE}
+#Function that simulates the results of a match between two teams
+predict.model1 <- function(home_team, away_team, sample_matrix) {
+  others <- sample_matrix[, "others"]
+  home_skill <- sample_matrix[, col_name("skill", which(teams_seriea == home_team))]
+  away_skill <- sample_matrix[, col_name("skill", which(teams_seriea == away_team))]
+  home_goals <- rpois(nrow(sample_matrix), exp(others + home_skill - away_skill))
+  away_goals <- rpois(nrow(sample_matrix), exp(others + away_skill - home_skill))
+  #Here we make the results: 1 if Roma won, 0 if it was a draw and -1 if Lazio won
+  results <- ifelse(home_goals > away_goals, 1, ifelse(home_goals == away_goals, 0, -1))
+  return(data.frame(home_goals, away_goals, results))
+}
+
+#Here we obtain the real data for the match between AS Roma and Lazio
+real_home_goals <- league_results_seriea.df$home_score[league_results_seriea.df$home_team == "Roma" & league_results_seriea.df$away_team == "Lazio"]
+real_away_goals <- league_results_seriea.df$away_score[league_results_seriea.df$home_team == "Roma" & league_results_seriea.df$away_team == "Lazio"]
+real_results <- ifelse(real_home_goals > real_away_goals, 1, ifelse(real_home_goals == real_away_goals, 0, -1))
+
+#Here we obtain the predictions for the match between AS Roma and Lazio
+predictions.df <- predict.model1("Roma", "Lazio", ms1)
+pred_home_goals <- predictions.df$home_goals
+pred_away_goals <- predictions.df$away_goals
+pred_results <- predictions.df$results
+```
+```{r plot_prediction_model1, echo=FALSE, fig.cap="Histograms of the predicted goals and results for the match between AS Roma and Lazio.", fig.height=8}
+#Here we plot the histogram of the predicted goals for AS Roma and Lazio and predicted results
+#We plot it alongside the real data
+par(mfrow=c(3,3))
+n_sims <- length(pred_home_goals)
+n_real_matches <- length(real_home_goals)
+hist(pred_home_goals, main="Predicted Home Goals", xlab="Goals", col="#8e1f2f", freq=FALSE, xlim = c(-0.5, 10), breaks = (0:100) - 0.5)
+
+hist(pred_away_goals, main="Predicted Away Goals", xlab="Goals", col="#87d8f7", freq=FALSE, xlim = c(-0.5, 10), breaks = (0:100) - 0.5)
+
+barplot(table(pred_results)/n_sims, main="Predicted Results", col="red", ylim=c(0, 1), names.arg=c("Lazio", "Draw", "Roma"))
+
+hist(real_home_goals, main="Real Home Goals", xlab="Goals", col="#8e1f2f", freq=FALSE, xlim = c(-0.5, 10), breaks = (0:100) - 0.5)
+
+hist(real_away_goals, main="Real Away Goals", xlab="Goals", col="#87d8f7", freq=FALSE, xlim = c(-0.5, 10), breaks = (0:100) - 0.5)
+
+barplot(table(real_results)/n_real_matches, main="Real Results", col="red", ylim=c(0, 1), names.arg=c("Lazio", "Draw", "Roma"))
+```
+
+As we can observe, the simulated data fits the historical data reasonably well and both the historical data and the simulation associate a higher probability of a win for AS Roma than for Lazio. Even though we can observe that the difference is not very high. It is of interest also to analyze the inverse match, that is, the match between Lazio and AS Roma. In Figure 9, we show the simulated results for this match and the distribution of the real results. In this case we can visualize in a better way a problem with our current model. While the simulated data looks the same, except that the home team and the away team swapped places, the historical data now shows that Lazio often wins against Roma when being the home team. We couldn't predict this pattern since our model doesn't incorporate the advantage of being the home team. This is why we propose a second model that includes this advantage.\
+
+
+```{r match_prediction_model2, echo=FALSE, fig.cap="Histograms of the predicted goals and results for the match between Lazio and AS Roma.", fig.height=8}
+#Here we obtain the real data for the match between Lazio and AS Roma
+real_home_goals <- league_results_seriea.df$home_score[league_results_seriea.df$home_team == "Lazio" & league_results_seriea.df$away_team == "Roma"]
+real_away_goals <- league_results_seriea.df$away_score[league_results_seriea.df$home_team == "Lazio" & league_results_seriea.df$away_team == "Roma"]
+real_results <- ifelse(real_home_goals > real_away_goals, 1, ifelse(real_home_goals == real_away_goals, 0, -1))
+
+#Here we obtain the predictions for the match between Lazio and AS Roma
+predictions.df <- predict.model1("Lazio", "Roma", ms1)
+pred_home_goals <- predictions.df$home_goals
+pred_away_goals <- predictions.df$away_goals
+pred_results <- predictions.df$results
+
+#Here we plot the histogram of the predicted goals for Lazio and AS Roma and predicted results
+#We plot it alongside the real data
+par(mfrow=c(3,3))
+n_sims <- length(pred_home_goals)
+n_real_matches <- length(real_home_goals)
+hist(pred_home_goals, main="Predicted Home Goals", xlab="Goals", col="#87d8f7", freq=FALSE, xlim = c(-0.5, 10), breaks = (0:100) - 0.5)
+
+hist(pred_away_goals, main="Predicted Away Goals", xlab="Goals", col="#8e1f2f", freq=FALSE, xlim = c(-0.5, 10), breaks = (0:100) - 0.5)
+
+barplot(table(pred_results)/n_sims, main="Predicted Results", col="red", ylim=c(0, 1), names.arg=c("Roma", "Draw", "Lazio"))
+
+hist(real_home_goals, main="Real Home Goals", xlab="Goals", col="#87d8f7", freq=FALSE, xlim = c(-0.5, 10), breaks = (0:100) - 0.5)
+
+hist(real_away_goals, main="Real Away Goals", xlab="Goals", col="#8e1f2f", freq=FALSE, xlim = c(-0.5, 10), breaks = (0:100) - 0.5)
+
+barplot(table(real_results)/n_real_matches, main="Real Results", col="red", ylim=c(0, 1), names.arg=c("Roma", "Draw", "Lazio"))
+
+```
+
+# Third Modeling Approach: Bayesian Hierarchical Model with Home Advantage
+
+In our past model we didn't considered two important facts that we observe or hypothesize from football data. The first, is that home advantage exists and it is important when predicting a match. The second, is that the performance of a team is not constant over time, but it varies by different factors like new players, injuries, etc. To account for these two facts, we propose a new Bayesian Hierarchical Model that incorporates these two factors. This model was proposed in a previous study by @predict-bayes and its very similar to the previous model, but incoporating the home advantage and season effects. Mathematically, for this model we write that the goal outcome of a match between team $i$ and team $j$ in season $s$ is modeled as:
+
+\begin{align}
+\text{GOAL}_{\text{home}} &\sim Pois(\lambda_{\text{home},i,j,s}), \\
+\text{GOAL}_{\text{away}} &\sim Pois(\lambda_{\text{away},i,j,s}).
+\end{align}
+
+We also assume that the mean of the Poisson distribution depends on the skills of the teams playing, since not all teams are equally good in different seasons. At the same time, the mean can also depend on external factors for the home or away teams, such as the stadium, weather, etc. Therefore, we model the mean of the Poisson distribution as:
+\begin{align}
+\log(\lambda_{\text{home},i,j,s}) &=\text{OTHERS}_{\text{home},s} + \text{SKILL}_{i,s} -  \text{SKILL}_{j,s},\\
+\log(\lambda_{\text{away},i,j,s}) &=\text{OTHERS}_{\text{away},s} - \text{SKILL}_{i,s} +  \text{SKILL}_{j,s}.
+\end{align}
+
+Now, th parameter for team performance, $\text{SKILL}_{i,s}$, denotes the team performance of team $i$ during season $s$. It is reasonable to assume that the team performance in each match is defined as a sample from the team performance distribution of the last season, since the team performance is not expected to change drastically from one season to another. Therefore, we model the team performance as:
+\begin{equation}
+\text{SKILL}_{i,s} \sim N(\text{SKILL}_{i,s-1}, \sigma_{\text{seasons}}^2).
+\end{equation}
+
+After defining the model, we need to specify the prior distributions for the parameters of the model in order to be able to make inferences about the skills of the teams and the means of the Poisson distributions. In this model we also propose very weakly informative priors for the parameters of the model, in order to avoid biasing the results of the model:
+\begin{align}
+\text{OTHERS} &\sim N(0, 4^2), \\
+\text{SKILL}_{i, \text{1st season}} &\sim N(\mu_{\text{teams}}, \sigma_{\text{teams}}^2), \\
+\mu_{\text{teams}} &\sim N(0, 4^2), \\
+\sigma_{\text{teams}} &\sim U(0, 3),\\
+\sigma_{\text{seasons}} &\sim U(0, 3).
+\end{align}
+
+Now that we defined the model and the prior distributions, we can estimate the parameters of the model using Bayesian statistics. We can write the above model using JAGS syntax as follows:
+
+\footnotesize
+```{r second_jags_model, echo=TRUE}
+model2 <- "model {
+  for (i in 1:n_games) {
+    home_goals[i]~dpois(lambda_home[season[i],home_team[i], away_team[i]])
+    away_goals[i]~dpois(lambda_away[season[i],home_team[i], away_team[i]])
+  }
+  
+  for (season_i in 1:n_seasons){
+    for (home_i in 1:n_teams) {
+      for (away_j in 1:n_teams) {
+        lambda_home[season_i, home_i, away_j]<-exp(others_home[season_i]
+        +skill[season_i,home_i]-skill[season_i,away_j])
+        lambda_away[season_i,home_i, away_j]<-exp(others_away[season_i]
+        +skill[season_i,away_j]-skill[season_i,home_i])
+      }
+    }
+  }
+  
+  skill[1,1] <- 0
+  for (j in 2:n_teams) {
+    skill[1,j]~dnorm(mu_team, tau_team)
+  }
+  
+  mu_team~dnorm(0, 0.0625)
+  tau_team<-1/pow(sigma_team,2)
+  sigma_team~dunif(0, 3)
+  
+  others_home[1]~dnorm(0, 0.0625)
+  others_away[1]~dnorm(0, 0.0625)
+  
+  for (season_i in 2:n_seasons) {
+    skill[season_i,1]<-0
+    for (j in 2:n_teams) {
+      skill[season_i,j]~dnorm(skill[season_i-1,j], tau_season)
+    }
+    others_home[season_i]~dnorm(others_home[season_i-1], tau_season)
+    others_away[season_i]~dnorm(others_away[season_i-1], tau_season)
+  }
+  
+  tau_season<-1/pow(sigma_season,2)
+  sigma_season~dunif(0, 3)
+}"
+```
+\normalsize
+
+After defining the model above, we can use the R2jags package to run the MCMC simulation andestimate the parameters of the model. We can write the code to setup and run the MCMC simulation as follows:
+
+\footnotesize
+```{r second_jags_model_run, echo=TRUE, cache=TRUE}
+run_model2 <- function(){
+  #Here we compile the first model
+  m2 <- jags.model(textConnection(model2),
+      data = data_seriea, n.chains = 3, n.adapt = 10000, quiet = TRUE)
+  #Here we burn the first 5000 iterations
+  update(m2, 10000)
+  #Here we generate MCMC samples
+  s2 <- coda.samples(m2,
+      variable.names = c("others_home", "others_away", "skill",
+                         "sigma_season","sigma_team", "mu_team"),
+      n.iter = 40000, thin = 8)
+  #Here we obtain the dic
+  dic2 <- dic.samples(m2, n.iter = 40000, thin = 8)
+  return(list(samples = s2, dic = dic2))
+}
+```
+```{r save_model2, echo=FALSE}
+#Here we run the model and save the results so we don't need to run it again
+if (file.exists("results_model2.rds")) {
+  res_model2 <- readRDS("results_model2.rds")
+} else {
+  res_model2 <- run_model2()
+  saveRDS(res_model2, "results_model2.rds")
+}
+
+#Here we save the samples in a matrix
+ms2 <- as.matrix(res_model2$samples)
+```
+```{r second_jags_model_run_premier, echo=FALSE, cache=TRUE}
+run_model2_premier <- function(){
+  #Here we compile the first model
+  m2_premier <- jags.model(textConnection(model2),
+      data = data_premier, n.chains = 3, n.adapt = 10000, quiet = TRUE)
+  #Here we burn the first 5000 iterations
+  update(m2_premier, 10000)
+  #Here we generate MCMC samples
+  s2_premier <- coda.samples(m2_premier,
+      variable.names = c("others_home", "others_away", "skill",
+                         "sigma_season","sigma_team", "mu_team"),
+      n.iter = 40000, thin = 8)
+  return(s2_premier)
+}
+#Here we run the model and save the results so we don't need to run it again
+if (file.exists("results_model2_premier.rds")) {
+  res_model2_premier <- readRDS("results_model2_premier.rds")
+} else {
+  res_model2_premier <- run_model2_premier()
+  saveRDS(res_model2_premier, "results_model2_premier.rds")
+}
+
+#Here we save the samples in a matrix
+ms2_premier <- as.matrix(res_model2_premier)
+```
+```{r second_jags_model_run_laliga, echo=FALSE, cache=TRUE}
+run_model2_laliga <- function(){
+  #Here we compile the first model
+  m2_laliga <- jags.model(textConnection(model2),
+      data = data_laliga, n.chains = 3, n.adapt = 10000, quiet = TRUE)
+  #Here we burn the first 5000 iterations
+  update(m2_laliga, 10000)
+  #Here we generate MCMC samples
+  s2_laliga <- coda.samples(m2_laliga,
+      variable.names = c("others_home", "others_away", "skill",
+                         "sigma_season","sigma_team", "mu_team"),
+      n.iter = 40000, thin = 8)
+  return(s2_laliga)
+}
+#Here we run the model and save the results so we don't need to run it again
+if (file.exists("results_model2_laliga.rds")) {
+  res_model2_laliga <- readRDS("results_model2_laliga.rds")
+} else {
+  res_model2_laliga <- run_model2_laliga()
+  saveRDS(res_model2_laliga, "results_model2_laliga.rds")
+}
+
+#Here we save the samples in a matrix
+ms2_laliga <- as.matrix(res_model2_laliga)
+```
+```{r second_jags_model_run_bundesliga, echo=FALSE, cache=TRUE}
+run_model2_bundesliga <- function(){
+  #Here we compile the first model
+  m2_bundesliga <- jags.model(textConnection(model2),
+      data = data_bundesliga, n.chains = 3, n.adapt = 10000, quiet = TRUE)
+  #Here we burn the first 5000 iterations
+  update(m2_bundesliga, 10000)
+  #Here we generate MCMC samples
+  s2_bundesliga <- coda.samples(m2_bundesliga,
+      variable.names = c("others_home", "others_away", "skill",
+                         "sigma_season","sigma_team", "mu_team"),
+      n.iter = 40000, thin = 8)
+  return(s2_bundesliga)
+}
+#Here we run the model and save the results so we don't need to run it again
+if (file.exists("results_model2_bundesliga.rds")) {
+  res_model2_bundesliga <- readRDS("results_model2_bundesliga.rds")
+} else {
+  res_model2_bundesliga <- run_model2_bundesliga()
+  saveRDS(res_model2_bundesliga, "results_model2_bundesliga.rds")
+}
+
+#Here we save the samples in a matrix
+ms2_bundesliga <- as.matrix(res_model2_bundesliga)
+```
+\normalsize
+
+One important observation is that given the changes in the model above, we had a lot of autocorrelation when sampling from the posterior distribution. This is a problem because it means that the samples are not independent and thus the MCMC sampler is not working properly. To solve this problem, we increased the number of samples and the amount of thinning, we also increased the number of iterations in the burn-in phase. This is not ideal, but it is a common problem when working with hierarchical models and it is a trade-off between computational time and accuracy.\
+
+Now that we have the samples, we can start analyzing the results. As a first observation, we can compare the DIC (Deviance Information Criterion) of the two Bayesian models proposed. The DIC is a measure of the goodness of fit of a model that takes into account the complexity of the model. The DIC is calculated as follows:
+\begin{equation}
+DIC = D(\bar{\theta}) + 2p_{D},
+\end{equation}
+
+where $D(\bar{\theta})$ is the deviance of the posterior mean of the parameters and $p_{D}$ is the effective number of parameters of the model. The larger the effective number of parameters is, the easier it is for the model to fit the data, and so the deviance needs to be penalized, this is why the lower the DIC, the better the model. However, the DIC is not an absolute measure, it is only useful for comparing models. We can calculate the DIC for the two models as follows:
+
+```{r calculate_dic, echo=FALSE}
+#Here we calculate the DIC for the two models
+dic_model1 <- res_model1$dic
+dic_model2 <- res_model2$dic
+DIC_1 <- sum(dic_model1$deviance) + sum(dic_model1$pD)
+DIC_2 <- sum(dic_model2$deviance) + sum(dic_model2$pD)
+#here we print the results
+print(c("DIC Model 1" = DIC_1, "DIC Model 2" = DIC_2))
+```
+
+As we can observe, the DIC of the second model is lower than the DIC of the first model, which means that the second model is a better fit for the data. This is expected since the second model is more complex and can fit the data better. At the same time, the second model incorporates crucial information like seasonality and home advantage, which are important factors in soccer matches.\
+
+Now we can analyze the results of the second model. Once we have the MCMC samples, it is also good practice to check the convergence of the MCMC simulation.  We can do this by checking the trace plots of the MCMC samples, which are plots that show the evolution of the MCMC samples over the iterations of the simulation. For example,in Figure 10, we show the trace plot of the $\sigma_{\text{seasons}}$ variable the teams in the Serie A dataset.
+
+```{r trace_plot_model2, echo=FALSE, fig.cap="Trace plot of the sigma_season variable of the teams in the Serie A dataset.",  fig.height=4}
+#Here we plot the trace plot of the skill of the teams
+plot(res_model2$samples[,"sigma_season"])
+```
+
+We can see that the trace plot is stationary, which is a good indication that the MCMC simulation has converged. At the same time, we can observe that the posterior distribution has a peak around 0.6 in comparison with the prior distribution, which was uniform. This means that the model has learned that the variance of the season effect on skill is around 0.6, which is a good result. We can also observe the Gelman-Rubin statistic (i.e. shrink factor) to check the convergence of the MCMC simulation. In Figure 11, we can see that the Gelman-Rubin statistic is close to 1 for the $\sigma_{\text{seasons}}$ parameter of the model, which is a good indication that the MCMC simulation has converged. We can also check the trace plot and the Gelman-Rubin statistic for the other parameters of the model, but we will not show them here for brevity.\
+
+```{r gelman_rubin_model2, echo=FALSE, fig.cap="Gelman-Rubin statistic for the sigma_season variable of the teams in the Serie A dataset.", fig.width=5, fig.height=4}
+#Here we plot the Gelman-Rubin statistic for the sigma_season variable
+gelman.plot(res_model2$samples[,"sigma_season"])
+```
+
+Finally, in Figure 12, we show the autocorrelation plot of the $\sigma_{\text{seasons}}$ variable of the teams in the Serie A dataset. As we can observe, this case is different than in the first model, with the autocorrelation being much higher at the beginning and taking longer to decay. This means that our hierarchical model is capturing more persistent season-to-season variability among the teams, indicating that the variance between teams' performances remains correlated over time. The slower decay suggests that the model accounts for more complex dependencies across seasons, aligning with the hierarchical structure's ability to model longer-term trends. Although the autocorrelation is still high, it is within acceptable limits, and the model is still valid.
+
+```{r autocorrelation_plot_model2, echo=FALSE, fig.cap="Autocorrelation plot of the sigma_season variable of the teams in the Serie A dataset.",  fig.height=4}
+#Here we plot the autocorrelation plot of the sigma_season of the teams
+par(mfrow=c(1,3))
+#Here we plot the autocorrelation of the samples of chain 1. We make the background white to improve visualization
+autplot1(res_model2$samples[,"sigma_season"], chain=1, style="plain")
+
+#Here we plot the autocorrelation of the samples of chain 2
+autplot1(res_model2$samples[,"sigma_season"], chain=2, style="plain")
+
+#Here we plot the autocorrelation of the samples of chain 3
+autplot1(res_model2$samples[,"sigma_season"], chain=3, style="plain")
+```
+
+As we can see, the MCMC simulation has converged, and the samples are approximately in-dependent (not really, but close enough). Now. we can start making inferences with our model. For example, now, in Figure 13, we can obtain a summary for the SKILL parameter for AS Roma and Lazio respectively for a particular season, in this case we chose the 2020-2021 season.
+
+```{r summary_model2, echo=FALSE, fig.cap="Summary of the skill parameter for season AS Roma and Lazio in season 2020-2021.", fig.height=4}
+par(mfrow=c(1,2))
+#Here we plot the summary of the skill parameter for AS Roma. We silence the output to avoid printing the summary
+plotPost(res_model2$samples[, col_name("skill", 10, which(teams_seriea == "Lazio"))], main="Lazio", col = "#87d8f7", xlab="Skill")
+
+#Here we plot the summary of the skill parameter for Juventus
+plotPost(res_model2$samples[, col_name("skill", 10, which(teams_seriea == "Roma"))], main="Roma", col = "#8e1f2f", xlab="Skill")
+```
+
+As we can observe, the posterior distribution for the skill parameter for AS Roma in this season has a mode of 0.011 with a HDI of [-0.105, 0.134], whereas for Lazio it takes a mode of -0.001 with a HDI of [-0.115, 0.124]. This means that AS Roma and Lazio are very similar in terms of skill for this season, with AS Roma having a slightly higher skill parameter than Lazio in contrast with what we found on the previous model. We can also observe what happens for the season before in Figure 14, where the roles invert, with Lazio having a slightly higher skill parameter than AS Roma.
+
+```{r summary_model3, echo=FALSE, fig.cap="Summary of the skill parameter for season AS Roma and Lazio in season 2019-2020.", fig.height=4}
+par(mfrow=c(1,2))
+#Here we plot the summary of the skill parameter for AS Roma. We silence the output to avoid printing the summary
+plotPost(res_model2$samples[, col_name("skill", 9, which(teams_seriea == "Lazio"))], main="Lazio", col = "#87d8f7", xlab="Skill")
+
+#Here we plot the summary of the skill parameter for Juventus
+plotPost(res_model2$samples[, col_name("skill", 9, which(teams_seriea == "Roma"))], main="Roma", col = "#8e1f2f", xlab="Skill")
+```
+
+It is important to notice that the skill parameter is defined relative to the skill of AC Milan in season 2011-2012, which is set to zero. Nevertheless, we can re-center this parameter by substraction the mean of the skill parameter for each team. In this way, we can compare the skill of the teams relative to the average skill of the other teams in the league. In Figure 15, we show the caterpillar plot for the skill parameter of the teams in all the 4 most important European leagues for the 2020-2021 season.
+
+```{r caterpillar_plot_model2, echo=FALSE, fig.cap="Caterpillar plot of the skill parameter for the teams in all European leagues for the 2020-2021 season.", fig.height=8}
+#Here we obtain the data for the Serie A
+team_skill <- ms2[, str_detect(string = colnames(ms2), "skill\\[10,")]
+team_skill <- (team_skill - rowMeans(team_skill))
+colnames(team_skill) <- teams_seriea
+team_skill <- team_skill[, order(colMeans(team_skill), decreasing = T)]
+
+#Here we obtain the data for the Premier League
+team_skill_premier <- ms2_premier[, str_detect(string = colnames(ms2_premier), "skill\\[10,")]
+team_skill_premier <- (team_skill_premier - rowMeans(team_skill_premier))
+colnames(team_skill_premier) <- teams_premier
+team_skill_premier <- team_skill_premier[, order(colMeans(team_skill_premier), decreasing = T)]
+
+#Here we obtain the data for the La Liga
+team_skill_laliga <- ms2_laliga[, str_detect(string = colnames(ms2_laliga), "skill\\[10,")]
+team_skill_laliga <- (team_skill_laliga - rowMeans(team_skill_laliga))
+colnames(team_skill_laliga) <- teams_laliga
+team_skill_laliga <- team_skill_laliga[, order(colMeans(team_skill_laliga), decreasing = T)]
+
+#here we obtain the data for the Bundesliga
+team_skill_bundesliga <- ms2_bundesliga[, str_detect(string = colnames(ms2_bundesliga), "skill\\[10,")]
+team_skill_bundesliga <- (team_skill_bundesliga - rowMeans(team_skill_bundesliga))
+colnames(team_skill_bundesliga) <- teams_bundesliga
+team_skill_bundesliga <- team_skill_bundesliga[, order(colMeans(team_skill_bundesliga), decreasing = T)]
+par(mar = c(2, 0.7, 0.7, 0.7), xaxs = "i")
+
+#Here we plot the 4 caterpillar plots for the 4 leagues
+par(mfrow=c(2,2), mar = c(2, 0.7, 0.7, 0.7), xaxs = "i")
+caterplot(team_skill,  main = "Serie A", xlab = "Skill", labels.loc = "above", style ="plain")
+abline(v = 0, col = "red", lty = 2)
+
+caterplot(team_skill_premier, labels.loc = "above", style ="plain", main = "Premier League", xlab = "Skill")
+abline(v = 0, col = "red", lty = 2)
+
+caterplot(team_skill_laliga, labels.loc = "above", style ="plain", main = "La Liga", xlab = "Skill")
+abline(v = 0, col = "red", lty = 2)
+
+caterplot(team_skill_bundesliga, labels.loc = "above", style ="plain", main = "Bundesliga", xlab = "Skill")
+abline(v = 0, col = "red", lty = 2)
+```
+
+As we can observe, from this plot we can distinguish the teams that are stronger than the average team in the league. It is of interest to notice that the well-considered "big" teams of the 4 most important European leagues are the ones with the highest skill parameter. In the Serie A, Juventus, Inter Milan, and Napoli are the teams with the highest skill parameter. In the Premier League, Manchester City, Liverpool, and Manchester United are the teams with the highest skill parameter. In La Liga, Barcelona, Real Madrid, and Atlético de Madrid are the teams with the highest skill parameter. In the Bundesliga, Bayern Munich, Borussia Dortmund, and RB Leipzig are the teams with the highest skill parameter. It is of interest to see that even though there are teams that didn't participate in the 2020-2021 season, we can still estimate their skill parameter, this happens because the model is able to estimate the skill parameter for the teams that didn't participate in the season by using the information of the teams that did participate in the season by means of the prior distribution of the skill parameter.
+
+# Home Advantage
+
+It is of interest also to infer the home advantage of a home team against an away team during a given season $s$ and showing how the external factors of home and away affect the match result. We can define the home advantage as the difference in other external factors between the home and away teams. As the situation changes over time, external factors can differ by season. Thus, the home advantage can be quantified as the home advantage in a particular season $s$ using the following equation:
+
+\begin{equation}
+\text{HA}_{s} = \text{OTHERS}_{\text{home}, s} - \text{OTHERS}_{\text{away}, s}.
+\end{equation}
+
+We can notice that this equation holds under the assumption that the home and away teams have the same skills. Therefore, we can estimate the home advantage by the difference in the Poisson parameter of the home and away teams as follows:
+
+\begin{equation}
+\text{HA}_{s} = \lambda_{\text{home}, s} - \lambda_{\text{away}, s}.
+\end{equation}
+
+This is, the difference between average goals scored by the home team and the average goals scored by the away team, that inherently depends on whether a team is playing at home or away. We can estimate the home advantage by season and plot it to see how it changes over time. In Figure 16 we present the home advantage by season for the top-4 European leagues from the 2011-2012 season to the 2020-2021 season along with its 95% credible interval and its posterior mean. Here, “After COVID-19” represents the collection of matches after the major stop of four major European leagues in March 2020 due to the COVID-19 pandemic.\
+
+As we can observe, in all four leagues, the mean values of HA in matches after the COVID-19 break were lower than those of the other nine seasons before the COVID-19 break. The mean value of HA in all matches in four European leagues from the 2011–2012
+season to the season immediately before the COVID-19 break was 0.35. The mean value of HA after the COVID-19 break was 0.17. This is, the number of goals scored by the home team decreased by an average of 0.18 goals, while considering the skill difference between the teams. This shows that COVID-19 negatively affected the home advantage for all four major European football leagues. In fact, specifally for the Premier League and La Liga, we can observe that their 95% credible interval falls completely outside of the mean value of HA before the COVID-19 break. This means that the home advantage in these two leagues was significantly affected by the COVID-19 pandemic.
+
+\pagebreak
+
+
+```{r home_adv_plot, echo=FALSE, fig.cap="Home advantage by season from the 2011-2012 season to the 2020-2021 season for top-4 European leagues.", fig.height=8}
+#Here we estimate the home advantage by season as the difference between the home and away others for Serie A
+home_adv <- exp(ms2[,  str_detect(string = colnames(ms2), "others_home\\[")]) - exp(ms2[, str_detect(string = colnames(ms2), "others_away\\[")])
+colnames(home_adv) <- c("SA 11-12", "SA 12-13", "SA 13-14", "SA 14-15", "SA 15-16", "SA 16-17", "SA 17-18", "SA 18-19", "SA 19-20", "After COVID-19")
+#Here we estimate the home advantage by season as the difference between the home and away others for Premier
+home_adv_premier <- exp(ms2_premier[,  str_detect(string = colnames(ms2_premier), "others_home\\[")]) - exp(ms2_premier[, str_detect(string = colnames(ms2_premier), "others_away\\[")])
+colnames(home_adv_premier) <- c("PL 11-12", "PL 12-13", "PL 13-14", "PL 14-15", "PL 15-16", "PL 16-17", "PL 17-18", "PL 18-19", "PL 19-20", "After COVID-19")
+#Here we estimate the home advantage by season as the difference between the home and away others for La Liga
+home_adv_laliga <- exp(ms2_laliga[,  str_detect(string = colnames(ms2_laliga), "others_home\\[")]) - exp(ms2_laliga[, str_detect(string = colnames(ms2_laliga), "others_away\\[")])
+colnames(home_adv_laliga) <- c("Liga 11-12", "Liga 12-13", "Liga 13-14", "Liga 14-15", "Liga 15-16", "Liga 16-17", "Liga 17-18", "Liga 18-19", "Liga 19-20", "After COVID-19")
+#Here we estimate the home advantage by season as the difference between the home and away others for Bundesliga
+home_adv_bundesliga <- exp(ms2_bundesliga[,  str_detect(string = colnames(ms2_bundesliga), "others_home\\[")]) - exp(ms2_bundesliga[, str_detect(string = colnames(ms2_bundesliga), "others_away\\[")])
+colnames(home_adv_bundesliga) <- c("BL 11-12", "BL 12-13", "BL 13-14", "BL 14-15", "BL 15-16", "BL 16-17", "BL 17-18", "BL 18-19", "BL 19-20", "After COVID-19")
+
+#We make a caterplot of the home advantage by season from the 2011-2012 season to the 2020-2021 season
+par(mfrow=c(2,2), mar = c(2, 0.7, 0.7, 0.7), xaxs = "i")
+caterplot(home_adv, labels.loc = "above", reorder = FALSE, style="plain")
+abline(v = mean(home_adv), col = "red", lty = 2)
+
+caterplot(home_adv_premier, labels.loc = "above", reorder = FALSE, style="plain")
+abline(v = mean(home_adv_premier), col = "red", lty = 2)
+
+caterplot(home_adv_laliga, labels.loc = "above", reorder = FALSE, style="plain")
+abline(v = mean(home_adv_laliga), col = "red", lty = 2)
+
+caterplot(home_adv_bundesliga, labels.loc = "above", reorder = FALSE, style="plain")
+abline(v = mean(home_adv_bundesliga), col = "red", lty = 2)
+
+```
+
+# Prediction of Match Results
+
+As in the previous model, from the MCMC samples it is not only possible to look at the distribution of parameter values, but also to make predictions about the matches by sampling from the posterior distribution of the parameters. In this case, the main distintion is that we can make predictions of matches depending on the season, given that the skill of the teams is different for each season. The main objective of this (last) part of the project is to predict the results of the matches for the 2020-2021 season from the posterior distribution of the parameters for the 2019-2020 season. In Figure 17 we show a density plot of the predictions of the number of goals scored by the home and away teams in two example matches: Roma vs Lazio and Juventus vs Torino, contrasted with the real results of the matches. 
+
+\pagebreak
+
+
+```{r match_prediction_model3, echo=FALSE}
+#Function that simulates the results of a match between two teams in the 2020-2021 season
+predict.model2 <- function(home_team, away_team, sample_matrix) {
+  others_home <- sample_matrix[, "others_home[9]"]
+  others_away <- sample_matrix[, "others_away[9]"]
+  home_skill <- sample_matrix[, col_name("skill", 9, which(teams_seriea == home_team))]
+  away_skill <- sample_matrix[, col_name("skill", 9, which(teams_seriea == away_team))]
+  lambda_home <- exp(others_home + home_skill - away_skill)
+  lambda_away <- exp(others_away + away_skill - home_skill)
+  home_goals <- rpois(nrow(sample_matrix), lambda_home)
+  away_goals <- rpois(nrow(sample_matrix), lambda_away)
+  #Here we make the results: 1 if Roma won, 0 if it was a draw and -1 if Lazio won
+  results <- ifelse(home_goals > away_goals, 1, ifelse(home_goals == away_goals, 0, -1))
+  return(data.frame(home_goals, away_goals, results, others_home, others_away, home_skill, away_skill, lambda_home, lambda_away))
+}
+```
+```{r density_pred, echo=FALSE, fig.cap="Density plot for the predictions of the number of goals scored by the home and away teams in a match between Roma - Lazio and Juventus - Torino in the 2020-2021 season."}
+#Here we obtain the predictions for the match between AS Roma and Lazio
+predictions.df <- predict.model2("Roma", "Lazio", ms2)
+pred_home_goals <- predictions.df$home_goals
+pred_away_goals <- predictions.df$away_goals
+pred_results <- predictions.df$results
+
+#Here we also obtain the real results for the match between AS Roma and Lazio on the 2020-2021 season
+real_home_goals <- league_results_seriea.df$home_score[league_results_seriea.df$home_team == "Roma" & league_results_seriea.df$away_team == "Lazio" & league_results_seriea.df$season == "2021"]
+real_away_goals <- league_results_seriea.df$away_score[league_results_seriea.df$home_team == "Roma" & league_results_seriea.df$away_team == "Lazio"& league_results_seriea.df$season == "2021"]
+
+#Here we obtain the predictions for the match between Juventus and Torino
+predictions.df2 <- predict.model2("Juventus", "Torino", ms2)
+pred_home_goals2 <- predictions.df2$home_goals
+pred_away_goals2 <- predictions.df2$away_goals
+pred_results2 <- predictions.df2$results
+
+#Here we also obtain the real results for the match between Juventus and Torino on the 2020-2021 season
+real_home_goals2 <- league_results_seriea.df$home_score[league_results_seriea.df$home_team == "Juventus" & league_results_seriea.df$away_team == "Torino" & league_results_seriea.df$season == "2021"]
+real_away_goals2 <- league_results_seriea.df$away_score[league_results_seriea.df$home_team == "Juventus" & league_results_seriea.df$away_team == "Torino"& league_results_seriea.df$season == "2021"]
+
+#Here we make a density plot of the simulated goals for AS Roma and Lazio and Juventus and Torino
+# Using raster
+#We add a limit to the x and y axis to make the plot more readable
+plot1 <-ggplot(predictions.df, aes(x=home_goals, y=away_goals)) +
+  stat_density_2d(aes(fill = ..density..), geom = "raster", contour = FALSE) +
+  scale_x_continuous(expand = c(0, 0), limits = c(-0.5, 5)) +
+  scale_y_continuous(expand = c(0, 0), limits = c(-0.5, 5))+
+  scale_fill_distiller(palette = "YlGnBu", direction = -1) +
+  labs(x = "Home Goals", y = "Away Goals", title="AS Roma (Home) vs Lazio (Away)") + 
+  geom_point(aes(x = real_home_goals, y = real_away_goals), color = "red", size = 3) +
+  geom_text(aes(x = real_home_goals, y = real_away_goals - 0.1, label = "Actual Result"), 
+            color = "red", size = 4, vjust = 1) +
+  theme(
+    plot.title = element_text(hjust = 0.5),
+    legend.position='left'
+  )
+
+plot2<-ggplot(predictions.df2, aes(x=home_goals, y=away_goals)) +
+  stat_density_2d(aes(fill = ..density..), geom = "raster", contour = FALSE) +
+  scale_x_continuous(expand = c(0, 0), limits = c(-0.5, 5)) +
+  scale_y_continuous(expand = c(0, 0), limits = c(-0.5, 5))+
+  scale_fill_distiller(palette = "YlGnBu", direction = -1) +
+  labs(x = "Home Goals", y = "Away Goals", title="Juventus (Home) vs Torino (Away)") + 
+  geom_point(aes(x = real_home_goals2, y = real_away_goals2), color = "red", size = 3) +
+  geom_text(aes(x = real_home_goals2, y = real_away_goals2 - 0.1, label = "Actual Result"), 
+            color = "red", size = 4, vjust = 1) +
+  theme(
+    plot.title = element_text(hjust = 0.5),
+    legend.position='right'
+  )
+
+grid.arrange(plot1, plot2, ncol=2)
+```
+
+
+As we can observe, in both cases we were able to predict AS Roma and Juventus' victories the majority of the time. However, we were not able to predict the exact number of goals scored by each team. In Table 6 we present a table with some estimations for the teams' skills, the probability of losing, drawing, and winning, the most frequent number of goals scored by the team, and the actual score. We can see more clearly from the table that we associate a higher probability of winning to the home teams given that their respective average goal scores are higher than the away teams. In particular, we present that 2-1 is the most frequent prediction for AS Roma and Juventus, which is a pretty good estimation of the actual score.
+
+```{r table6, echo=FALSE}
+#Here we create a table with the team, if it is home or away, the mean SKILL of the team, the mean OTHER of the team, the mean lambda of the team, the probability of losing, drawing and winning, the most frequent number of goals of the team, the actual score
+table6 <- data.frame(home_away = c("Home", "Away", "Home", "Away"),
+                     team = c("Roma", "Lazio", "Juventus", "Torino"),
+                     mean_other = c(mean(predictions.df$others_home), mean(predictions.df$others_away), mean(predictions.df2$others_home), mean(predictions.df2$others_away)),
+                     mean_skill = c(mean(predictions.df$home_skill), mean(predictions.df$away_skill), mean(predictions.df2$home_skill), mean(predictions.df2$away_skill)),
+                     mean_lambda = c(mean(predictions.df$lambda_home), mean(predictions.df$lambda_away), mean(predictions.df2$lambda_home), mean(predictions.df2$lambda_away)),
+                     prob_lose = c(sum(predictions.df$results == -1)/nrow(predictions.df), sum(predictions.df$results == 1)/nrow(predictions.df), sum(predictions.df2$results == -1)/nrow(predictions.df2), sum(predictions.df2$results == 1)/nrow(predictions.df2)),
+                     prob_draw = c(sum(predictions.df$results == 0)/nrow(predictions.df), sum(predictions.df$results == 0)/nrow(predictions.df), sum(predictions.df2$results == 0)/nrow(predictions.df2), sum(predictions.df2$results == 0)/nrow(predictions.df2)),
+                     prob_win = c(sum(predictions.df$results == 1)/nrow(predictions.df), sum(predictions.df$results == -1)/nrow(predictions.df), sum(predictions.df2$results == 1)/nrow(predictions.df2), sum(predictions.df2$results == -1)/nrow(predictions.df2)),
+                    actual_score = c(real_home_goals, real_away_goals, real_home_goals2, real_away_goals2),
+                     most_frequent_goals = c(names(which.max(table(predictions.df$home_goals))), names(which.max(table(predictions.df$away_goals))), names(which.max(table(predictions.df2$home_goals))), names(which.max(table(predictions.df2$away_goals)))))
+                    
+
+knitr::kable(table6, caption = "Table with estimated parameter values and probabilities for the two matches.", col.names = c("Status", "Team Name", "Mean OTHERS", "Mean SKILL", "Lambda", "Lose", "Draw", "Win", "Outcome", "Most Freq."), digits = 2)
+```
+
+As a final exercise, we can try to predict the top-4 teams that enter the Champions League for the Serie A by predicting all the match results and tracking the points of each team. We will use the same methodology as before, by simulating the matches and predicting the results. We will then calculate the points of each team and see which teams are in the top-4. We will also compare the results with the actual Serie A table. In Table 7 we present the top-4 teams that we predicted using our model.
+
+
+```{r top4, echo=FALSE, cache=TRUE}
+#We obtain the dataframe of the Serie A matches for the 2020/2021 season
+df_seriea <- league_results_seriea.df[league_results_seriea.df$season == 2021,]
+#Now we select the home teams and the away teams
+home_teams <- df_seriea$home_team
+away_teams <- df_seriea$away_team
+#Here we create an item to store the points of each team
+points <- data.frame(team = teams_seriea, points = rep(0, length(teams_seriea)))
+#Here we create a list to store the predicted winners
+predicted_winners <- rep(NA, nrow(df_seriea))
+#Now we loop for each match
+for (i in 1:nrow(df_seriea)){
+  #We simulate the match
+  match.df <- predict.model2(home_teams[i], away_teams[i],ms2)
+  results <- match.df$results
+  #If the most frequent result is 1, the home team wins, if it is 0, it is a draw, if it is -1, the away team wins
+  #Here we find the most frequent result
+  most_frequent_result <- names(which.max(table(results)))
+  #If the most frequent result is 1, the home team wins
+  if (most_frequent_result == "1"){
+    points[points$team == home_teams[i], "points"] <- points[points$team == home_teams[i], "points"] + 3
+    #Here we add the predicted winner to the list
+    predicted_winners[i] <- home_teams[i]
+  }
+  #If the most frequent result is 0, it is a draw
+  if (most_frequent_result == "0"){
+    points[points$team == home_teams[i], "points"] <- points[points$team == home_teams[i], "points"] + 1
+    points[points$team == away_teams[i], "points"] <- points[points$team == away_teams[i], "points"] + 1
+    #Here we add the predicted winner to the list
+    predicted_winners[i] <- "Draw"
+  }
+  #If the most frequent result is -1, the away team wins
+  if (most_frequent_result == "-1"){
+    points[points$team == away_teams[i], "points"] <- points[points$team == away_teams[i], "points"] + 3
+    #Here we add the predicted winner to the list
+    predicted_winners[i] <- away_teams[i]
+  }
+}
+```
+
+As we can observe, we predicted Inter as the winner of the league, with Juventus as a runner-up and Atalanta and Napoli as the other two teams that enter the Champions League. Surprisingly, this is not very far away from the actual Serie A table, where Inter won the league, Atalanta entered the Champions League, but Juventus finished in the fourth position and Napoli in the fifth. We can see that we were able to predict three out of the four teams that entered the Champions League just by using the match results and the Poisson regression model. This is an example of the power of Bayesian statistics and the Poisson regression model in predicting football match results and the potential of this model to be used in other sports as well.
+
+```{r top4_printed, echo=FALSE}
+#We sort the teams by points
+points <- points[order(points$points, decreasing = TRUE),]
+#We print the top-4 teams
+top4 <- points[1:4,]
+knitr::kable(top4, caption = "Top-4 teams of the Serie A 2020/2021 season predicted by the model.", col.names = c("Team", "Points"))
+```
+
+It is of interest to quantify the accuracy of our model in predicting the match results. We can do this by comparing the predicted winners with the actual winners of the matches. We can calculate the accuracy of our model by dividing the number of correct predictions by the total number of matches. The accuracy of our model is given by:
+
+```{r accuracy, echo=FALSE}
+#First we obtain the actual winners of the matches on the 2020/2021 Serie A season
+actual_winners <- rep(NA, nrow(df_seriea))
+for (i in 1:nrow(df_seriea)){
+  if (df_seriea$home_score[i] > df_seriea$away_score[i]){
+    actual_winners[i] <- df_seriea$home_team[i]
+  }
+  if (df_seriea$home_score[i] < df_seriea$away_score[i]){
+    actual_winners[i] <- df_seriea$away_team[i]
+  }
+  if (df_seriea$home_score[i] == df_seriea$away_score[i]){
+    actual_winners[i] <- "Draw"
+  }
+}
+#Now we calculate the accuracy of our model
+accuracy <- sum(predicted_winners == actual_winners)/length(actual_winners)
+#We print the accuracy
+print(paste("Accuracy:", round(accuracy*100, 2), "%"))
+```
+
+This is not bad, considering is better than random guessing. It is not ideal, but predicting football match results is a very challenging task, as there are many factors that can influence the outcome of a match.  This model can be further improved by including more features, such as the number of shots on target, the number of corners, the number of fouls, and other statistics that can influence the outcome of a match. This model can also be used to predict the outcomes of other sports, such as basketball, baseball, and American football, by including the relevant statistics for each sport.
+
+# Conclusion
+
+In conclusion, this project successfully proposed and compared two Bayesian Hierarchical Models and a frequentist Poisson regression model to predict the number of goals scored in football matches. Using data from the top four European leagues over ten seasons (2011-2021), we demonstrated the effectiveness of Bayesian methods in modeling and predicting match outcomes, estimating parameters via the MCMC method using JAGS. The models provided valuable insights into key aspects of football, including home advantage and its evolution post-COVID-19, reflecting the influence of the pandemic on match dynamics. Furthermore, the simulation of the 2020-2021 season outcomes, based on the estimated parameters from 2019-2020, allowed us to assess the predictive power of our models under unusual conditions, such as matches played without spectators.
+
+\pagebreak
+
+
+
+
+# Appendix A: Poisson Regression Model
+
+```{r poisson-regression_premier, echo=FALSE}
+pois_model_premier <- glm(goals ~ home + team + opponent, family=poisson(link=log),
+                  data=df_premier)
+
+#Here we print only the results with coefficients with p-value < 0.05
+results.premier <- data.frame(summary(pois_model_premier)[12])
+colnames(results.premier) <- c("Estimate", "Std. Error", "Z-Value", "P-Value")
+
+results.premier <- results.premier[results.premier$`P-Value` < 0.05,]
+knitr::kable(results.premier, caption = "Significant Results of the Poisson regression model fitted to the Premier League data.")
+```
+```{r poisson-regression_laliga, echo=FALSE}
+pois_model_laliga <- glm(goals ~ home + team + opponent, family=poisson(link=log),
+                  data=df_laliga)
+
+#Here we print only the results with coefficients with p-value < 0.05
+results.laliga <- data.frame(summary(pois_model_laliga)[12])
+colnames(results.laliga) <- c("Estimate", "Std. Error", "Z-Value", "P-Value")
+
+results.laliga <- results.laliga[results.laliga$`P-Value` < 0.05,]
+knitr::kable(results.laliga, caption = "Significant Results of the Poisson regression model fitted to the La Liga data.")
+```
+```{r poisson-regression_bundesliga, echo=FALSE}
+pois_model_bundesliga <- glm(goals ~ home + team + opponent, family=poisson(link=log),
+                  data=df_bundesliga)
+
+#Here we print only the results with coefficients with p-value < 0.05
+results.bundesliga <- data.frame(summary(pois_model_bundesliga)[12])
+colnames(results.bundesliga) <- c("Estimate", "Std. Error", "Z-Value", "P-Value")
+
+results.bundesliga <- results.bundesliga[results.bundesliga$`P-Value` < 0.05,]
+knitr::kable(results.bundesliga, caption = "Significant Results of the Poisson regression model fitted to the Bundesliga data.")
+```
+
+
+<!--
+# References
+\setlength{\parindent}{-0.2in}
+\setlength{\leftskip}{0.2in}
+\setlength{\parskip}{8pt}
+\vspace*{-0.2in}
+\noindent
+-->

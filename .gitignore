@@ -6,6 +6,29 @@ __pycache__/
 # C extensions
 *.so
 
+#RDATA
+.RData
+.Rhistory
+
+#svm-latex-ms.tex
+svm-latex-ms.tex
+
+#data
+data/leagues_results.csv
+data/seriea_results.csv
+
+#final_project
+final_project/figs/
+final_project/.RData
+final_project/.Rhistory
+final_project/results.R
+final_project/final_project.tex
+final_project/results_model1.rds
+final_project/results_model2.rds
+final_project/results_model2_bundesliga.rds
+final_project/results_model2_laliga.rds
+final_project/results_model2_premier.rds
+
 # Distribution / packaging
 .Python
 build/
