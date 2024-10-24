@@ -41,7 +41,7 @@ doi = {10.3390/e24030366}
 
 ## Datasets
 
-The data used to work in this repository was obtained via simulations by running the `data/data_scraper.py` file. In order to obtain the data used for the analysis follow the steps below:
+The data used to work in this repository was obtained by running the `data/data_scraper.py` file. In order to obtain the data used for the analysis follow the steps below:
 
 **1.** Make sure you modify the saving path accordingly to where you want to obtain the data.
 
